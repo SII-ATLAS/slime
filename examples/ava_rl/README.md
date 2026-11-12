@@ -113,7 +113,8 @@ process lifetime and record the owning PID separately from GPU jobs.
 
 `run_qwen35.sh` uses the repository's Qwen model config and expects MODEL_DIR,
 TRAIN_DATA, RUN and CHECKPOINT_DIR. LOAD_DIR/CKPT_STEP select native resume;
-NUM_ROLLOUT defaults1000, save20, B32G8/128K, MIS+R3, SCoff. WEIGHT_INTERVAL
+NUM_ROLLOUT defaults1000, save20, B32G8/128K, MIS+R3, SCoff. USE_R3=0
+disables routing replay for an explicit ablation (default1 retains it). WEIGHT_INTERVAL
 (default1) can select the separate delayed-publication feature when installed.
 EVAL_CONFIG can retain the existing held-out datasets; this recipe does not run
 online evaluation. Review all flags before selecting this experiment recipe.
