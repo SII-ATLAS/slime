@@ -40,7 +40,7 @@ from slime.utils.types import RolloutBatch
 
 from ...utils.tensor_backper import TensorBackuper
 from .checkpoint import load_checkpoint
-from .cp_utils import prepare_routed_experts_for_routing_replay, slice_log_prob_with_cp
+from .cp_utils import slice_log_prob_with_cp
 from .data import DataIterator, get_data_iterator
 from .hf_checkpoint_saver import save_hf_model_to_path
 from .initialize import init, is_megatron_main_rank
@@ -327,7 +327,7 @@ class MegatronTrainRayActor(TrainRayActor):
             iterator.reset()
 
         replay_source = rollout_data["rollout_routed_experts"]
-        disk_prefetcher = None
+        replay_prefetcher = None
         prepare_kwargs = {
             "num_experts": self.args.num_experts,
             "data_pad_size_multiplier": self.args.data_pad_size_multiplier,
@@ -344,35 +344,29 @@ class MegatronTrainRayActor(TrainRayActor):
             if any(disk_backed) and not all(disk_backed):
                 raise ValueError("A routing replay microbatch cannot mix disk-backed and resident route tensors.")
 
-            if layer_ids and all(disk_backed):
-                if disk_prefetcher is None:
-                    disk_prefetcher = RoutedExpertsMicrobatchPrefetcher(self.args.routing_replay_prefetch_microbatches)
+            if layer_ids:
+                if replay_prefetcher is None:
+                    replay_prefetcher = RoutedExpertsMicrobatchPrefetcher(
+                        self.args.routing_replay_prefetch_microbatches
+                    )
                 source = RoutedExpertsMicrobatch(
                     values,
                     batch["tokens"],
                     consumer_count=len(layer_ids),
                     prepare_kwargs=prepare_kwargs,
                 )
-                disk_prefetcher.add(source)
+                replay_prefetcher.add(source)
                 for replay, layer_id in zip(RoutingReplay.all_routing_replays, layer_ids, strict=True):
                     replay.record(RoutedExpertsLayerRef(source, layer_id))
-            elif layer_ids:
-                rollout_routed_experts = prepare_routed_experts_for_routing_replay(
-                    values,
-                    batch["tokens"],
-                    **prepare_kwargs,
-                )
-                for replay, layer_id in zip(RoutingReplay.all_routing_replays, layer_ids, strict=True):
-                    replay.record(rollout_routed_experts[:, layer_id])
 
             # Drop manager-owned references as soon as this microbatch has
             # been registered, bounding actor RSS during setup.
             for sample_idx in batch_indices:
                 replay_source[sample_idx] = None
 
-        if disk_prefetcher is not None:
-            disk_prefetcher.start()
-            RoutingReplay.register_lazy_resource(disk_prefetcher)
+        if replay_prefetcher is not None:
+            replay_prefetcher.start()
+            RoutingReplay.register_lazy_resource(replay_prefetcher)
 
         del rollout_data["rollout_routed_experts"]
 

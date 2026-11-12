@@ -417,5 +417,157 @@ def test_local_worker_lifecycle_is_scoped_to_source(monkeypatch, transport):
     assert all(not worker.worker_thread.is_alive() for worker in workers)
 
 
+def test_recoverable_group_failure_is_replaced_without_fake_reward(monkeypatch):
+    from slime.rollout.base_types import RecoverableRolloutError
+
+    worker = _make_worker(monkeypatch)
+    failed = [Sample(index=i, prompt="failed") for i in range(8)]
+
+    def result():
+        raise RecoverableRolloutError("grader_invalid", "no verdict", source="ava_math")
+
+    worker._make_done_cb(0, failed)(SimpleNamespace(result=result))
+    kept = [
+        [Sample(index=10 + i * 8 + j, status=Sample.Status.COMPLETED, reward=1.0) for j in range(8)] for i in range(2)
+    ]
+    for i, group in enumerate(kept, 1):
+        worker.output_queue.put((i, group))
+    monkeypatch.setattr(fa, "_get_worker", lambda *args: worker)
+    discarded = []
+    monkeypatch.setattr(fa, "discard_rollout_group", lambda group, *args, **kwargs: discarded.append(group))
+    args = SimpleNamespace(
+        rollout_batch_size=2, rollout_data_transport="object-store", rollout_sample_filter_path=None
+    )
+    output = asyncio.run(fa._generate_rollout_async(args, 0, None))
+    assert output.samples == kept and all(len(group) == 8 for group in output.samples)
+    assert discarded == [failed] and worker.data_buffer.requeued == []
+    assert all(sample.reward is None for sample in failed)
+    assert worker.error is None
+    assert output.metrics["rollout/failures/dropped_groups"] == 1
+    assert output.metrics["rollout/failures/ava_math/grader_invalid"] == 1
+
+
+def test_recoverable_group_failure_budget_stops_persistent_failure(monkeypatch):
+    from slime.rollout.base_types import RolloutGroupFailure
+
+    worker = _make_worker(monkeypatch)
+    for i in range(3):
+        worker.output_queue.put((i, RolloutGroupFailure(_make_group(i), "sandbox", "terminal")))
+    monkeypatch.setattr(fa, "_get_worker", lambda *args: worker)
+    monkeypatch.setattr(fa, "discard_rollout_group", lambda *args, **kwargs: None)
+    args = SimpleNamespace(
+        rollout_batch_size=2,
+        rollout_data_transport="object-store",
+        rollout_sample_filter_path=None,
+        fully_async_max_consecutive_failed_groups=3,
+    )
+    with pytest.raises(RuntimeError, match="Consecutive failed"):
+        asyncio.run(fa._generate_rollout_async(args, 0, None))
+
+
+def test_group_failure_settles_siblings_and_preserves_unknown_errors(monkeypatch):
+    from slime.rollout import sglang_rollout as sg
+    from slime.rollout.base_types import RecoverableRolloutError
+
+    monkeypatch.setattr(sg, "GenerateState", lambda args: SimpleNamespace(aborted=False))
+
+    async def scenario(error):
+        started, cleaned = asyncio.Event(), asyncio.Event()
+
+        async def generate(args, sample, params, **kwargs):
+            if sample.index == 0:
+                await started.wait()
+                raise error
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        monkeypatch.setattr(sg, "generate_and_rm", generate)
+        with pytest.raises(type(error), match=str(error)):
+            await sg.generate_and_rm_group(SimpleNamespace(group_rm=False), [Sample(index=0), Sample(index=1)], {})
+        assert cleaned.is_set()
+
+    asyncio.run(scenario(RecoverableRolloutError("sandbox", "known failure")))
+    asyncio.run(scenario(ValueError("unknown bug")))
+
+
+def test_ava_failure_policy_preserves_valid_zero_and_detects_collection_error(monkeypatch):
+    from examples.ava_rl.failures import fail_attempt, validate_verifier
+    from slime.rollout.base_types import RecoverableRolloutError
+
+    monkeypatch.delenv("AVA_TOLERATE_ROLLOUT_FAILURES", raising=False)
+    with pytest.raises(RuntimeError) as caught:
+        fail_attempt("test", "failed")
+    assert not isinstance(caught.value, RecoverableRolloutError)
+    monkeypatch.setenv("AVA_TOLERATE_ROLLOUT_FAILURES", "1")
+    for reason in ["1 failed in 0.2s", "1 passed in 0.2s", {"pytest_log": "1 failed"}]:
+        validate_verifier({"reward": {"score": 0.0, "reason": reason}})
+    for output in ["ERROR collecting test_final_state.py", "_____ ERROR collecting /tests/test.py _____\nImportError"]:
+        with pytest.raises(RecoverableRolloutError) as caught:
+            validate_verifier({"reward": {"score": 0.0, "reason": {"pytest_log": output}}})
+        assert caught.value.reason == "verifier_collection_error"
+    with pytest.raises(RecoverableRolloutError, match="infrastructure"):
+        validate_verifier({"verifier_error": {"type": "RuntimeExecutionError"}})
+
+
+@pytest.mark.parametrize(
+    "status,recoverable,error_type,expected_calls",
+    [
+        (500, True, "SandboxReadyTimeoutException", 3),
+        (500, True, "VerificationError", 1),
+        (500, False, "ValueError", 1),
+        (500, False, "TaskEnvError", 1),
+        (403, True, "HttpError", 1),
+    ],
+)
+def test_ava_rpc_respects_native_classification_over_real_http(
+    monkeypatch, status, recoverable, error_type, expected_calls
+):
+    from aiohttp import web
+    from examples.ava_rl.generate import Service
+    from slime.rollout.base_types import RecoverableRolloutError
+
+    monkeypatch.setenv("AVA_TOLERATE_ROLLOUT_FAILURES", "1")
+
+    async def scenario():
+        calls = []
+
+        async def handle(request):
+            calls.append(await request.json())
+            return web.json_response(
+                {
+                    "error_type": error_type,
+                    "message": "original native failure",
+                    "recoverable": recoverable,
+                    "retryable": True,
+                },
+                status=status,
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/generate", handle)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            state = SimpleNamespace(url=f"http://127.0.0.1:{port}", token="local-test")
+            with pytest.raises(RuntimeError) as caught:
+                await Service.call(state, "generate", {"key": "test"})
+            assert isinstance(caught.value, RecoverableRolloutError) == (
+                status == 500 and (recoverable or error_type == "TaskEnvError")
+            )
+            if isinstance(caught.value, RecoverableRolloutError):
+                assert str(caught.value) == "Native Ava generate: original native failure"
+        finally:
+            await runner.cleanup()
+        assert len(calls) == expected_calls
+
+    asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

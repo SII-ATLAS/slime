@@ -15,7 +15,12 @@ from tqdm import tqdm
 from slime.backends.sglang_utils.server_control import abort_servers_until_idle, get_live_router_workers
 from slime.data.transport import discard_rollout_group, publish_rollout_async
 from slime.observability.trace_utils import build_sglang_meta_trace_attrs, trace_function, trace_span
-from slime.rollout.base_types import RolloutFnEvalOutput, RolloutFnTrainOutput, finalize_rollout_groups
+from slime.rollout.base_types import (
+    RecoverableRolloutError,
+    RolloutFnEvalOutput,
+    RolloutFnTrainOutput,
+    finalize_rollout_groups,
+)
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter, should_drop_dynamic_filter_output
 from slime.rollout.sample_hooks import apply_rollout_sample_hooks
 from slime.utils.async_utils import AsyncPacer, run
@@ -424,7 +429,18 @@ async def generate_and_rm_group(
             current_sampling_params["sampling_seed"] = seed
         tasks[idx] = asyncio.create_task(generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation))
 
-    results = await asyncio.gather(*tasks.values())
+    try:
+        results = await asyncio.gather(*tasks.values())
+    except BaseException as error:
+        # Settle every sibling before the owner discards a failed group.
+        for task in tasks.values():
+            task.cancel()
+        settled = await asyncio.gather(*tasks.values(), return_exceptions=True)
+        if isinstance(error, RecoverableRolloutError):
+            for result in settled:
+                if isinstance(result, Exception) and not isinstance(result, RecoverableRolloutError):
+                    raise result
+        raise
     group = list(group)
     for idx, result in zip(tasks, results, strict=True):
         group[idx] = result

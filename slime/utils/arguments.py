@@ -364,6 +364,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--fully-async-max-consecutive-failed-groups",
+                type=int,
+                default=32,
+                help="Stop after this many explicitly recoverable failed groups without an accepted group.",
+            )
+            parser.add_argument(
                 "--fully-async-group-prefetch-factor",
                 type=int,
                 default=1,
@@ -1230,7 +1236,7 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 "--routing-replay-prefetch-microbatches",
                 type=int,
                 default=1,
-                help="Number of upcoming disk-backed R3 microbatches to prefetch into CPU memory.",
+                help="Number of upcoming R3 microbatches to prepare in CPU memory (resident and disk-backed routes).",
             )
             parser.add_argument(
                 "--use-opsm",
@@ -2281,6 +2287,9 @@ def slime_validate_args(args):
             args.rollout_function_path = "slime.rollout.fully_async_rollout.generate_rollout_fully_async"
         if args.eval_function_path is None:
             args.eval_function_path = "slime.rollout.sglang_rollout.generate_rollout"
+
+    if args.fully_async_max_consecutive_failed_groups < 1:
+        raise ValueError("--fully-async-max-consecutive-failed-groups must be positive")
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
