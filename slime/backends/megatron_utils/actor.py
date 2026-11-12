@@ -626,7 +626,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.sleep()
 
     @timer
-    def update_weights(self) -> None:
+    def update_weights(self, *, weight_version: int | None = None) -> None:
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
@@ -674,6 +674,10 @@ class MegatronTrainRayActor(TrainRayActor):
                 ray.get(self.rollout_manager.clear_updatable_num_new_engines.remote())
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+            if weight_version is not None:
+                if weight_version <= self.weight_updater.weight_version:
+                    raise ValueError("Published training weight versions must increase")
+                self.weight_updater.weight_version = weight_version - 1
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
