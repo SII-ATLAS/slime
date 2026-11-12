@@ -39,7 +39,14 @@ import threading
 import time
 
 from slime.data.transport import discard_rollout_group, publish_rollout_async
-from slime.rollout.base_types import RolloutFnTrainOutput, finalize_rollout_groups, iter_samples, prepare_retry_group
+from slime.rollout.base_types import (
+    RecoverableRolloutError,
+    RolloutFnTrainOutput,
+    RolloutGroupFailure,
+    finalize_rollout_groups,
+    iter_samples,
+    prepare_retry_group,
+)
 from slime.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from slime.rollout.sglang_rollout import GenerateState, generate_and_rm_group
 from slime.utils.async_utils import run
@@ -99,7 +106,7 @@ class AsyncRolloutWorker:
         # and freeze every in-flight generation. Backpressure lives in _loop()
         # instead, which stops topping up while a full pool of completed groups
         # is already waiting to be consumed.
-        self.output_queue: queue.Queue[tuple[int, list[Sample]]] = queue.Queue()
+        self.output_queue: queue.Queue[tuple[int, list[Sample] | RolloutGroupFailure]] = queue.Queue()
         self.poll_interval = 0.01
         self.worker_thread: threading.Thread | None = None
         self.state = GenerateState(args)
@@ -144,7 +151,7 @@ class AsyncRolloutWorker:
             if self.worker_thread.is_alive():
                 raise TimeoutError("Generation did not stop within 35 seconds")
 
-    def get_completed_groups(self, limit: int | None = None) -> list[tuple[int, list[Sample]]]:
+    def get_completed_groups(self, limit: int | None = None) -> list[tuple[int, list[Sample] | RolloutGroupFailure]]:
         """Pop up to ``limit`` completed groups (all of them when ``None``).
 
         Callers that only need a fixed number of groups must pass ``limit`` —
@@ -152,7 +159,7 @@ class AsyncRolloutWorker:
         these groups are fully generated and reward-scored, with their prompts
         already consumed from ``data_buffer``.
         """
-        completed: list[tuple[int, list[Sample]]] = []
+        completed: list[tuple[int, list[Sample] | RolloutGroupFailure]] = []
         while limit is None or len(completed) < limit:
             try:
                 completed.append(self.output_queue.get_nowait())
@@ -188,6 +195,8 @@ class AsyncRolloutWorker:
                     for t in done:
                         try:
                             t.result()  # results already handled in callback
+                        except RecoverableRolloutError:
+                            pass  # The callback queued the failed-group disposition.
                         except Exception as e:  # noqa: BLE001
                             logger.warning("fully-async task crashed: %r", e)
                     active_tasks -= done
@@ -254,6 +263,9 @@ class AsyncRolloutWorker:
                 result = done_task.result()
             except asyncio.CancelledError:
                 return
+            except RecoverableRolloutError as error:
+                self.output_queue.put((gid, RolloutGroupFailure(input_group, error.reason, error.source)))
+                return
             except Exception as error:
                 self.error = error
                 return
@@ -292,6 +304,9 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
 
     collected = []
     dropped_count = 0
+    failed_count = 0
+    consecutive_failures = 0
+    failure_reasons: dict[str, int] = {}
     drop_reasons: dict[str, int] = {}
     metric_gatherer = MetricGatherer()
     dynamic_filter = (
@@ -311,6 +326,23 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
         drained = 0
         for _gid, group in worker.get_completed_groups(limit=target - len(collected)):
             drained += 1
+            if isinstance(group, RolloutGroupFailure):
+                reason = f"{group.source}/{group.reason}"
+                failed_count += 1
+                consecutive_failures += 1
+                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+                logger.warning("Discarding failed rollout group %s (%s)", _gid, reason)
+                await asyncio.to_thread(
+                    discard_rollout_group,
+                    group.samples,
+                    args,
+                    reason,
+                    controller=getattr(data_buffer, "controller", None),
+                )
+                if consecutive_failures >= getattr(args, "fully_async_max_consecutive_failed_groups", 32):
+                    raise RuntimeError("Consecutive failed rollout group limit reached; inspect generation logs")
+                continue
+            consecutive_failures = 0
             verdict = call_dynamic_filter(dynamic_filter, args, group)
             metric_gatherer.on_group_completed(verdict)
             if verdict.keep:
@@ -361,6 +393,10 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
     metrics["rollout/dynamic_filter/dropped_groups"] = dropped_count
     metrics["rollout/dynamic_filter/dropped_ratio"] = dropped_count / (len(collected) + dropped_count)
     metrics.update(metric_gatherer.collect())
+    if failed_count:
+        metrics["rollout/failures/dropped_groups"] = failed_count
+        metrics["rollout/failures/group_ratio"] = failed_count / (len(collected) + dropped_count + failed_count)
+        metrics.update({f"rollout/failures/{reason}": count for reason, count in failure_reasons.items()})
     if args.rollout_sample_filter_path is not None:
         # Preserve the calling thread/context of custom batch hooks.
         output = finalize_rollout_groups(
@@ -372,10 +408,10 @@ async def _generate_rollout_async(args, rollout_id: int, data_buffer) -> Rollout
             args,
             rollout_id,
             collected,
-            metrics if filters_enabled else None,
+            metrics if filters_enabled or failed_count else None,
             controller=getattr(data_buffer, "controller", None),
         )
-    return output if filters_enabled or args.rollout_data_transport == "straw" else output.samples
+    return output if filters_enabled or failed_count or args.rollout_data_transport == "straw" else output.samples
 
 
 def generate_rollout_fully_async(args, rollout_id, data_buffer, evaluation: bool = False):

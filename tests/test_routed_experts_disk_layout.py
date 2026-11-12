@@ -223,5 +223,36 @@ def test_prefetch_propagates_corrupt_requested_route_bytes(tmp_path, monkeypatch
         assert source._future is None
 
 
+@pytest.mark.parametrize("dtype", [torch.uint8, torch.int32])
+def test_resident_replay_is_lazy_bounded_and_matches_eager_layout(monkeypatch, dtype):
+    from slime.utils import accelerator
+
+    monkeypatch.setattr(accelerator, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(cp_utils.mpu, "get_context_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(cp_utils.mpu, "get_context_parallel_rank", lambda: 1)
+    monkeypatch.setattr(cp_utils.mpu, "get_tensor_model_parallel_world_size", lambda: 2, raising=False)
+    monkeypatch.setattr(cp_utils.mpu, "get_tensor_model_parallel_rank", lambda: 0, raising=False)
+    routes = (torch.arange(127 * 6 * 2).reshape(127, 6, 2) % 251).to(dtype)
+    tokens = [torch.arange(128)]
+    kwargs = dict(num_experts=251, data_pad_size_multiplier=2, sequence_parallel=True, allgather_cp=False)
+    expected = prepare_routed_experts_for_routing_replay([routes], tokens, **kwargs)
+    prefetcher = RoutedExpertsMicrobatchPrefetcher(0)
+    sources = [RoutedExpertsMicrobatch([routes], tokens, consumer_count=6, prepare_kwargs=kwargs) for _ in range(32)]
+    for source in sources:
+        prefetcher.add(source)
+    prefetcher.begin_pass("backward")
+    assert all(source._cpu_tensor is None and source._future is None for source in sources)
+    try:
+        for layer in range(6):
+            assert torch.equal(sources[0].layer_to_cuda(layer, "forward"), expected[:, layer].to(torch.int32))
+        assert sources[0]._cpu_tensor is not None
+        assert all(source._cpu_tensor is None for source in sources[1:])
+        for layer in range(6):
+            assert torch.equal(sources[0].layer_to_cuda(layer, "backward"), expected[:, layer].to(torch.int32))
+        assert sources[0]._cpu_tensor is None
+    finally:
+        prefetcher.close()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))

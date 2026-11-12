@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/sii-avalanche/AvaCore.git",
+  "revision": "6d4f0dd2b9e7d7e830445b64e019ae5ad98d759f",
+  "python": "3.12.12",
+  "installation": "uv sync --frozen --no-dev --no-editable using the upstream uv.lock",
+  "runtime_python": "/opt/ava/bin/python"
+}

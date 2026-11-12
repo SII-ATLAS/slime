@@ -527,5 +527,48 @@ def test_parse_xml_tool_uses_ignores_unknown_tool():
     assert "<tool_call>" in cleaned  # left untouched
 
 
+@pytest.mark.parametrize("reasoning", ["", "Still thinking"])
+def test_openai_empty_non_tool_reply_is_text(reasoning):
+    from slime.agent.parsing import ParsedModelOutput
+
+    wire, manager, finish = openai._build_reply_parts(
+        ParsedModelOutput(reasoning=reasoning, text="", tool_uses=[]), "length"
+    )
+    assert wire["content"] == manager["content"] == ""
+    assert finish == "length"
+    assert wire.get("reasoning_content", "") == reasoning
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+@pytest.mark.parametrize("timeout,expected", [(0.02, 504), (2.0, 200)])
+def test_openai_configurable_read_timeout_with_delayed_upstream(timeout, expected):
+    class SlowServer(FakeSGLangServer):
+        async def _handle(self, request):
+            await asyncio.sleep(0.15)
+            return await super()._handle(request)
+
+    async def run_case():
+        async with SlowServer([[(-0.1, 101)]]) as server:
+            adapter = openai.OpenAIAdapter(
+                tokenizer=FakeTokenizer(outputs={(101,): "done"}), sglang_url=server.url, request_read_timeout=timeout
+            )
+            adapter.open_session("timeout-test")
+            async with TestClient(TestServer(adapter.app)) as client:
+                response = await client.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "m",
+                        "metadata": {"session_id": "timeout-test"},
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                )
+                assert response.status == expected
+                if expected == 200:
+                    assert (await response.json())["choices"][0]["message"]["content"] == "done"
+            await adapter.drop_session("timeout-test")
+
+    asyncio.run(run_case())

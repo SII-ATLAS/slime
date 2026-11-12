@@ -10,6 +10,26 @@ if TYPE_CHECKING:
     from slime.data.transport import DiskPayloadRef
 
 
+class RecoverableRolloutError(RuntimeError):
+    """A custom generator explicitly declares this attempt unusable, not resumable.
+
+    Fully-async rollout discards the entire prompt group and collects a replacement.
+    Unknown exceptions and ordinary ABORTED continuations retain their old behavior.
+    """
+
+    def __init__(self, reason: str, message: str, *, source: str = "unknown"):
+        super().__init__(message)
+        self.reason = reason
+        self.source = source
+
+
+@dataclass
+class RolloutGroupFailure:
+    samples: list[Sample | list[Sample]]
+    reason: str
+    source: str
+
+
 @dataclass
 class RolloutFnTrainOutput:
     # Accept Sample groups or a straw manifest referencing the selected batch.

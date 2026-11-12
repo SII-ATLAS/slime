@@ -253,7 +253,7 @@ def _build_reply_parts(parsed: ParsedModelOutput, finish: str) -> tuple[dict[str
         # send content=null when there are tool_calls: some OpenAI clients split
         # a mixed text+tool_calls turn into two echoed messages otherwise, which
         # diverges the history match against our leaf
-        "content": None if wire_tool_calls else (parsed.text or None),
+        "content": None if wire_tool_calls else (parsed.text or ""),
     }
     # manager_message must match what the client echoes on the next request, or
     # the manager's history match (dict equality) diverges and every turn forks.
