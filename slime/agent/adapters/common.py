@@ -212,7 +212,11 @@ class BaseAdapter:
         fork_threshold_tokens: int | None = None,
         debug_callback: Callable[..., None] | None = None,
         rollout_args: Any = None,
+        request_read_timeout: float = 900,
     ) -> None:
+        if not math.isfinite(request_read_timeout) or request_read_timeout <= 0:
+            raise ValueError("request_read_timeout must be finite and positive")
+        self.request_read_timeout = request_read_timeout
         self.tokenizer = tokenizer
         self.rollout_args = rollout_args
         self.sglang_url = sglang_url.rstrip("/") if isinstance(sglang_url, str) else sglang_url
@@ -570,7 +574,7 @@ async def call_sglang_generate(
     sglang_url = adapter.sglang_url
     rid = None
     headers = {"X-SMG-Routing-Key": session_id} if session_id and session_id != "default" else None
-    timeout = aiohttp.ClientTimeout(total=None, sock_read=900)
+    timeout = aiohttp.ClientTimeout(total=None, sock_read=adapter.request_read_timeout)
     captured = Sample(tokens=list(prompt_ids))
     max_new_tokens = int(sp["max_new_tokens"])
     partial_rollout = getattr(adapter.rollout_args, "partial_rollout", False)

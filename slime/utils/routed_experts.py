@@ -135,7 +135,7 @@ def materialize_routed_experts(value: Any, *, pin_memory: bool = False) -> torch
 
 
 class RoutedExpertsMicrobatchPrefetcher:
-    """Bounded disk-to-CPU prefetch queue shared by one actor rollout."""
+    """Bounded replay-layout prefetch queue shared by one actor rollout."""
 
     def __init__(self, prefetch_microbatches: int) -> None:
         self.prefetch_microbatches = max(0, int(prefetch_microbatches))
@@ -196,7 +196,7 @@ class RoutedExpertsMicrobatch:
 
     def __init__(
         self,
-        values: list[TensorRef],
+        values: list[torch.Tensor | TensorRef],
         tokens: list[torch.Tensor],
         *,
         consumer_count: int,
