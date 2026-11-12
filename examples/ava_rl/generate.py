@@ -33,7 +33,10 @@ class Service(metaclass=SingletonMeta):
     def __init__(self, args):
         # Reserve capacity for a complete generate -> reward transaction, not
         # just its first HTTP request, so queued generation cannot starve reward.
-        self.admission = asyncio.Semaphore(int(os.environ.get("AVA_RPC_CONCURRENCY", "4")))
+        concurrency = int(os.environ.get("AVA_RPC_CONCURRENCY", "4"))
+        if concurrency < 1:
+            raise ValueError("AVA_RPC_CONCURRENCY must be positive")
+        self.admission = asyncio.Semaphore(concurrency)
         if args.apply_chat_template:
             raise ValueError("Ava's model adapter renders the template; disable --apply-chat-template")
         self.turn_counts = {}
@@ -134,44 +137,51 @@ class Service(metaclass=SingletonMeta):
     async def call(self, operation, payload):
         call_started = time.monotonic()
         timeout = aiohttp.ClientTimeout(total=float(os.environ.get("AVA_RPC_TIMEOUT", "1500")), connect=10)
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
-            for attempt in range(3):  # Ava runner.Retry.attempts_per_trial default.
-                async with session.post(
-                    self.url + "/v1/" + operation, json=payload, headers={"Authorization": "Bearer " + self.token}
-                ) as response:
-                    if response.status < 400:
-                        result = await response.json()
-                        record(
-                            "ava_rpc",
-                            operation=operation,
-                            key=payload.get("key"),
-                            seconds=time.monotonic() - call_started,
-                        )
-                        return result
-                    error = await response.json()
-                    # Retry only a definitive pre-generation readiness failure.
-                    # Never replay ambiguous network failures or agent commands.
-                    if (
-                        operation == "generate"
-                        and response.status == 500
-                        and attempt < 2
-                        and error.get("error_type") == "SandboxReadyTimeoutException"
-                        and error.get("retryable") is True
-                    ):
-                        logging.getLogger(__name__).warning(
-                            "Ava sandbox readiness retry %d/3 for %s", attempt + 2, payload.get("key")
-                        )
-                        continue
-                    # Ava runner also drops terminal TaskEnvError trials; they
-                    # have no usable outcome and should not be retried in place.
-                    if response.status == 500 and (
-                        error.get("recoverable") is True or error.get("error_type") == "TaskEnvError"
-                    ):
-                        fail_attempt(
-                            f"{operation}_{error.get('error_type', 'recoverable')}",
-                            f"Native Ava {operation}: {error.get('message', '')}",
-                        )
-                    raise RuntimeError(f"Native Ava {operation} HTTP {response.status}; inspect Ava service log")
+        try:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
+                for attempt in range(3):  # Ava runner.Retry.attempts_per_trial default.
+                    async with session.post(
+                        self.url + "/v1/" + operation, json=payload, headers={"Authorization": "Bearer " + self.token}
+                    ) as response:
+                        if response.status < 400:
+                            result = await response.json()
+                            record(
+                                "ava_rpc",
+                                operation=operation,
+                                key=payload.get("key"),
+                                seconds=time.monotonic() - call_started,
+                            )
+                            return result
+                        error = await response.json()
+                        # Retry only a definitive pre-generation readiness failure.
+                        # Never replay ambiguous network failures or agent commands.
+                        if (
+                            operation == "generate"
+                            and response.status == 500
+                            and attempt < 2
+                            and error.get("error_type") == "SandboxReadyTimeoutException"
+                            and error.get("retryable") is True
+                        ):
+                            logging.getLogger(__name__).warning(
+                                "Ava sandbox readiness retry %d/3 for %s", attempt + 2, payload.get("key")
+                            )
+                            continue
+                        # Ava runner also drops terminal TaskEnvError trials; they
+                        # have no usable outcome and should not be retried in place.
+                        if response.status == 500 and (
+                            error.get("recoverable") is True or error.get("error_type") == "TaskEnvError"
+                        ):
+                            fail_attempt(
+                                f"{operation}_{error.get('error_type', 'recoverable')}",
+                                f"Native Ava {operation}: {error.get('message', '')}",
+                            )
+                        raise RuntimeError(f"Native Ava {operation} HTTP {response.status}; inspect Ava service log")
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError, TimeoutError) as error:
+            if self.process.poll() is not None:
+                raise RuntimeError("Native Ava service exited; inspect its dedicated log") from error
+            # The request may have executed. Never replay it: disconnect invokes
+            # native cancellation/cleanup; the consumer discards the whole group.
+            fail_attempt(f"{operation}_rpc_transport", f"Native Ava RPC failed: {type(error).__name__}")
 
 
 def config_for(source, model, context_limit=32768):

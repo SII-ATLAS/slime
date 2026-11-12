@@ -539,10 +539,6 @@ def test_openai_empty_non_tool_reply_is_text(reasoning):
     assert wire.get("reasoning_content", "") == reasoning
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 @pytest.mark.parametrize("timeout,expected", [(0.02, 504), (2.0, 200)])
 def test_openai_configurable_read_timeout_with_delayed_upstream(timeout, expected):
     class SlowServer(FakeSGLangServer):
@@ -572,3 +568,78 @@ def test_openai_configurable_read_timeout_with_delayed_upstream(timeout, expecte
             await adapter.drop_session("timeout-test")
 
     asyncio.run(run_case())
+
+
+@pytest.mark.parametrize(
+    "mode,expected_calls",
+    [
+        ("timeout", 1),
+        ("disconnect", 1),
+        ("recoverable", 1),
+        ("ready", 3),
+        ("auth", 1),
+        ("unknown", 1),
+        ("dead_service", 1),
+    ],
+)
+def test_ava_rpc_failures_do_not_replay_ambiguous_actions(monkeypatch, mode, expected_calls):
+    from types import SimpleNamespace
+    from aiohttp import web
+    from examples.ava_rl.generate import Service
+    from slime.rollout.base_types import RecoverableRolloutError
+
+    monkeypatch.setenv("AVA_TOLERATE_ROLLOUT_FAILURES", "1")
+    monkeypatch.setenv("AVA_RPC_TIMEOUT", "0.1" if mode == "timeout" else "2")
+
+    async def run_case():
+        calls = []
+        cancelled = asyncio.Event()
+
+        async def handle(request):
+            calls.append(await request.json())
+            if mode == "timeout":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            if mode in ("disconnect", "dead_service"):
+                request.transport.close()
+                return web.Response()
+            status = 401 if mode == "auth" else 500
+            error_type = "SandboxReadyTimeoutException" if mode == "ready" else "RuntimeExecutionError"
+            return web.json_response(
+                {"error_type": error_type, "recoverable": mode in ("ready", "recoverable"), "retryable": True},
+                status=status,
+            )
+
+        app = web.Application()
+        app.router.add_post("/v1/generate", handle)
+        async with TestServer(app, handler_cancellation=True) as server:
+            service = object.__new__(Service)
+            service.url, service.token = str(server.make_url("")).rstrip("/"), "test"
+            service.process = SimpleNamespace(poll=lambda: 1 if mode == "dead_service" else None)
+            expected = RuntimeError if mode in ("auth", "unknown", "dead_service") else RecoverableRolloutError
+            with pytest.raises(expected) as raised:
+                await service.call("generate", {"key": "same-trial"})
+            if expected is RuntimeError:
+                assert not isinstance(raised.value, RecoverableRolloutError)
+            if mode == "timeout":
+                await asyncio.wait_for(cancelled.wait(), timeout=1)
+            assert len(calls) == expected_calls
+            assert all(call == {"key": "same-trial"} for call in calls)
+
+    asyncio.run(run_case())
+
+
+@pytest.mark.parametrize("concurrency", ["0", "-1"])
+def test_ava_zero_admission_is_configuration_error(monkeypatch, concurrency):
+    from examples.ava_rl.generate import Service
+
+    monkeypatch.setenv("AVA_RPC_CONCURRENCY", concurrency)
+    # Validate before starting adapters, subprocesses, or remote work.
+    with pytest.raises(ValueError, match="AVA_RPC_CONCURRENCY must be positive"):
+        Service.__init__(object.__new__(Service), None)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

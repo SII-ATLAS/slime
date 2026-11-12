@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 from ava_core.application.service.service import serving
 from ava_core.core.model import kind
 from ava_core.generate.terminal import TerminalBenchTerminus2
-from ava_core.generate.tools.terminus.terminus_json_plain_parser import TerminusJSONPlainParser
+from ava_core.generate.tools.terminus.terminus_json_plain_parser import ParseResult, TerminusJSONPlainParser
 from ava_core.generate.tools.terminus.tmux_session import TmuxSession
 from ava_core.runtime.runtime import RuntimeExecutionError
 from examples.ava_rl.diagnostics import record
@@ -26,7 +26,13 @@ class ValidatedTerminalJSONParser(TerminusJSONPlainParser):
     """Validate native tmux input constraints before any command is executed."""
 
     def parse_response(self, response):
-        result = super().parse_response(response)
+        try:
+            result = super().parse_response(response)
+        except (ValueError, OverflowError, RecursionError):
+            # This is a pure parser boundary: JSON integer/depth limits and
+            # float(duration) overflow are malformed model actions, not runtime
+            # failures. Leave the raw response in the native trace for feedback.
+            return ParseResult([], False, "Action JSON exceeds numeric or nesting limits", "")
         if not result.error:
             if any("\0" in command.keystrokes for command in result.commands):
                 return replace(
