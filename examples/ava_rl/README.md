@@ -131,3 +131,6 @@ Run them in the image before GPU use. Real GPU acceptance must show original
 Math/Terminal scoring, finite nonzero gradients, expected publication versions,
 failed-group replacement, full model/optimizer/RNG/rollout save and continued
 training. Submission and a readable checkpoint directory alone do not pass.
+
+A contract-by-contract review of native error handling, omissions fixed by this
+adapter, and the R3 memory/time tradeoff is recorded in [AUDIT.md](AUDIT.md).
