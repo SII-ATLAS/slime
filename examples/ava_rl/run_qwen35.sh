@@ -34,7 +34,6 @@ ARGS=(
   --advantage-estimator grpo
   --pg-loss-type reinforce
   --disable-grpo-std-normalization
-  --use-rollout-routing-replay
   --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
   --flush-cache-interval 8
   --sglang-server-concurrency 2
@@ -110,6 +109,11 @@ ARGS=(
   --sglang-enable-metrics
   --eval-max-context-len 131072
 )
+case "${USE_R3:-1}" in
+  1) ARGS+=(--use-rollout-routing-replay) ;;
+  0) ;;
+  *) echo 'USE_R3 must be 0 or 1.' >&2; exit 2 ;;
+esac
 if [[ "${WEIGHT_INTERVAL:-1}" != 1 ]]; then
   ARGS+=(--update-weights-interval "$WEIGHT_INTERVAL")
 fi
