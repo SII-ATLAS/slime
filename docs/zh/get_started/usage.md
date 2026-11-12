@@ -522,3 +522,20 @@ if __name__ == "__main__":
 - `--custom-megatron-init-path`：会增加一些 init 的调用；
 - `--custom-megatron-before-log-prob-hook-path`：会在计算 log prob 之前调用；
 - `--custom-megatron-before-train-step-hook-path`：会在每个训练步之前调用。可以考虑用这种方式混入特殊的训练 loss 之类的。
+
+
+### 延迟发布训练权重
+
+`--update-weights-interval N` 默认为 `1`：启动时发布一次权重，之后每完成
+N 次训练更新再发布一次。目前支持训推 GPU 分离、仅 actor 的 fully-async
+Megatron 训练，以及 full/NCCL 权重传输。从第 0 步启动、间隔为 64 时，发布
+版本为 1、65、129……；从第 40 次更新的 checkpoint 恢复时先发布版本 41，
+然后在累计第 64 次更新后发布 65。恢复首发会改变现场的生成策略，因此不能
+将重启后的运行当作不中断运行的等价轨迹。
+
+checkpoint 仍按独立的保存频率落盘，保存与最终更新都不会额外触发提前发布。
+最终模型需加载最终 checkpoint 独立评测；当前不允许在延迟发布时配置在线评测。
+`--flush-cache-interval` 按计划发布次数计数，N64/F8 在第 512 次更新时刷新，
+启动时总会完整刷新一次。`rollout/staleness/*` 使用训练时钟，并额外输出
+`training_weight_version`、`published_weight_version` 和 `publication_lag`。
+发布后旧队列中的样本仍可陈旧，不能把发布滞后归零当作样本年龄归零。

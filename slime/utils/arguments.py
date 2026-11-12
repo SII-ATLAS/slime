@@ -146,6 +146,12 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                     "packing remains controlled by the rollout runtime requirements."
                 ),
             )
+            parser.add_argument(
+                "--update-weights-interval",
+                type=int,
+                default=1,
+                help="Publish actor weights every N completed training updates; always publish once at startup.",
+            )
             # Delta weight sync.
             parser.add_argument(
                 "--update-weight-mode",
@@ -2290,6 +2296,21 @@ def slime_validate_args(args):
 
     if args.fully_async_max_consecutive_failed_groups < 1:
         raise ValueError("--fully-async-max-consecutive-failed-groups must be positive")
+    if args.update_weights_interval < 1:
+        raise ValueError("--update-weights-interval must be positive")
+    if args.update_weights_interval > 1:
+        if (
+            args.train_backend != "megatron"
+            or args.colocate or args.offload_rollout or args.release_train or args.use_critic
+            or args.update_weight_mode != "full" or args.update_weight_transport != "nccl"
+            or "fully_async" not in args.rollout_function_path
+            or args.debug_train_only or args.debug_rollout_only or args.load_debug_rollout_data
+            or args.eval_interval is not None
+        ):
+            raise ValueError(
+                "--update-weights-interval >1 requires live fully-async Megatron actor-only training, "
+                "separate GPUs, full NCCL weight transfer, and independent evaluation."
+            )
 
     if args.eval_function_path is None:
         args.eval_function_path = args.rollout_function_path
