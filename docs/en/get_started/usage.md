@@ -540,3 +540,22 @@ In some customized Megatron implementations, special operations need to be perfo
   - `--custom-megatron-init-path`: Adds some initialization calls.
   - `--custom-megatron-before-log-prob-hook-path`: Is called before calculating the log probability.
   - `--custom-megatron-before-train-step-hook-path`: Is called before each training step. You could use this to mix in special training losses, for example.
+
+
+### Delayed actor weight publication
+
+`--update-weights-interval N` (default `1`) publishes actor weights once at startup,
+then after each multiple of `N` completed training updates. This currently supports
+fully-async, separate-GPU, actor-only Megatron training with full NCCL weight sync.
+For example, interval 64 publishes versions 1, 65, 129, ... from a fresh run.
+A checkpoint resume at update 40 first publishes version 41, then publishes 65
+at cumulative update 64. This startup publication resets the live serving policy;
+a restarted run is therefore not equivalent to uninterrupted delayed publication.
+
+Checkpoints keep their independent save schedule and do not publish early.
+The last update also does not force an extra publication. Evaluate final model
+checkpoints independently; online evaluation is rejected for delayed publication.
+`--flush-cache-interval` counts scheduled publications (F8 at update 512 for N64),
+including a full cache refresh at startup. `rollout/staleness/*` uses the training
+clock and reports `training_weight_version`, `published_weight_version`, and
+`publication_lag`; old queued samples can remain stale after a publication.

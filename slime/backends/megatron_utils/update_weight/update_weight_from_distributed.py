@@ -107,7 +107,10 @@ class UpdateWeightFromDistributed:
         """
         self.weight_version += 1
         flush_cache = should_flush_cache(
-            self.args.flush_cache_interval, self.weight_version, getattr(self.args, "update_weight_start_version", 0)
+            self.args.flush_cache_interval,
+            self.weight_version,
+            getattr(self.args, "update_weight_start_version", 0),
+            update_weights_interval=getattr(self.args, "update_weights_interval", 1),
         )
 
         if dist.get_rank() == 0:

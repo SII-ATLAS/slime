@@ -12,6 +12,7 @@ from slime.utils.misc import should_run_periodic_action
 
 def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
     release_train = args.release_train
+    interval = getattr(args, "update_weights_interval", 1)
 
     actor_model, critic_model = create_training_models(args, pgs, rollout_manager)
 
@@ -19,7 +20,10 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         ray.get(rollout_manager.onload_weights.remote())
 
     # Always push actor weights to rollout once weights are loaded.
-    actor_model.update_weights()
+    if interval == 1:
+        actor_model.update_weights()
+    else:
+        actor_model.update_weights(weight_version=args.start_rollout_id + 1)
     # Reattached async producers stay paused until restored weights are installed.
     # This startup notification resumes them once, before entering the train loop.
     ray.get(rollout_manager.training_ready.remote())
@@ -85,12 +89,15 @@ def train(args, pgs, rollout_manager, num_rollout_per_epoch, restore_plan):
         offload_train(actor_trains)
         if args.offload_rollout and not release_train:
             ray.get(rollout_manager.onload_weights.remote())
-        was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
-        actor_model.update_weights()
-        # Final evaluation uses the synchronized engines directly. Keep training
-        # producers paused when no later rollout will consume their new work.
-        if rollout_id + 1 < args.num_rollout:
-            ray.get(rollout_manager.resume_rollout_admission.remote(was_paused))
+        if (rollout_id + 1) % interval == 0:
+            was_paused = ray.get(rollout_manager.pause_rollout_admission.remote())
+            if interval == 1:
+                actor_model.update_weights()
+            else:
+                actor_model.update_weights(weight_version=rollout_id + 2)
+            # Final publication leaves producers paused for orderly shutdown.
+            if rollout_id + 1 < args.num_rollout:
+                ray.get(rollout_manager.resume_rollout_admission.remote(was_paused))
 
         if args.offload_rollout:
             ray.get(rollout_manager.onload_kv.remote())

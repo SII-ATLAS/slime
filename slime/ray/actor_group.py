@@ -175,10 +175,11 @@ class RayTrainGroup:
             self.args.no_load_optim = self.args.no_save_optim
             self.args.no_load_rng = False
 
-    def update_weights(self) -> None:
+    def update_weights(self, *, weight_version: int | None = None) -> None:
         """Publish actor weights; disk reload is coordinated after all ranks save."""
         if not self._full_disk_weight_update_enabled():
-            ray.get([actor.update_weights.remote() for actor in self._actor_handlers])
+            kwargs = {} if weight_version is None else {"weight_version": weight_version}
+            ray.get([actor.update_weights.remote(**kwargs) for actor in self._actor_handlers])
             return
 
         weight_version = self._disk_weight_version + 1
