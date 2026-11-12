@@ -280,7 +280,16 @@ def log_rollout_data(rollout_id, args, samples, rollout_extra_metrics, rollout_t
         return
 
     log_dict = {**(rollout_extra_metrics or {})}
-    log_dict |= dict_add_prefix(compute_staleness_metrics(samples, weight_version), "rollout/")
+    age_version = weight_version
+    if getattr(args, "update_weights_interval", 1) > 1:
+        # Collection precedes this training update. Serving can remain frozen
+        # across many updates, so policy age must use the training clock.
+        age_version = rollout_id + 1
+        log_dict["rollout/staleness/training_weight_version"] = age_version
+        if weight_version is not None:
+            log_dict["rollout/staleness/published_weight_version"] = weight_version
+            log_dict["rollout/staleness/publication_lag"] = age_version - weight_version
+    log_dict |= dict_add_prefix(compute_staleness_metrics(samples, age_version), "rollout/")
     log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), "rollout/")
     log_dict |= dict_add_prefix(compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     logger.info(f"perf {rollout_id}: {log_dict}")

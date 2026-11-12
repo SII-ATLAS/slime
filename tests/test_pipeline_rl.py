@@ -1,5 +1,6 @@
 """CPU checks for the SGLang control protocol used by PipelineRL."""
 
+import ast
 import importlib.util
 import sys
 import types
@@ -121,6 +122,149 @@ def test_engine_reset_uses_consistent_collective_order_across_workers(engine_mod
         list(pool.map(lambda engine: engine.reset_weights_update_groups(), engines))
     assert calls == [names, names]
     assert all(not engine._weight_update_groups for engine in engines)
+
+
+@pytest.mark.parametrize("start,interval,end", [(0, 1, 5), (0, 64, 130), (20, 64, 130)])
+def test_training_publication_interval_preserves_updates_and_saves(start, interval, end):
+    """Execute the real driver loop with synchronous Ray/model test doubles."""
+    from types import SimpleNamespace
+
+    path = Path(__file__).resolve().parents[1] / "train.py"
+    function = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "train")
+    events, publications, saves, consumed_versions = [], [], [], []
+    version = start
+
+    def publish(**kwargs):
+        nonlocal version
+        version = kwargs.get("weight_version", version + 1)
+        publications.append(version)
+
+    def remote(function):
+        return SimpleNamespace(remote=function)
+
+    actor = SimpleNamespace(
+        update_weights=publish,
+        async_train=lambda step, data: events.append(step),
+        clear_memory=lambda: None,
+    )
+    manager = SimpleNamespace(
+        training_ready=remote(lambda: None),
+        generate=remote(lambda step: consumed_versions.append((step, version))),
+        training_completed=remote(lambda step: None),
+        pause_rollout_admission=remote(lambda: False),
+        resume_rollout_admission=remote(lambda previous: None),
+    )
+    args = SimpleNamespace(
+        release_train=False, update_weights_interval=interval,
+        offload_rollout=False, offload_train=False, check_weight_update_equal=False,
+        num_rollout=end, start_rollout_id=start, eval_interval=None, use_critic=False, save_interval=20,
+    )
+    namespace = {
+        "ray": SimpleNamespace(get=lambda value: value),
+        "create_training_models": lambda *a: (actor, None),
+        "should_run_periodic_action": lambda step, every, *a: every is not None and (step + 1) % every == 0,
+        "save_checkpoint": lambda args, step, *a, **kw: saves.append((step, list(events))),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
+    namespace["train"](args, None, manager, None, None)
+    assert events == list(range(start, end))
+    assert publications == [start + 1] + [step + 2 for step in events if (step + 1) % interval == 0]
+    assert [step for step, _ in saves] == [step for step in events if (step + 1) % 20 == 0]
+    assert all(history == list(range(start, step + 1)) for step, history in saves)
+    if interval == 64:
+        assert dict(consumed_versions)[63] == start + 1
+        assert dict(consumed_versions)[64] == 65
+        assert dict(consumed_versions)[127] == 65
+        assert dict(consumed_versions)[128] == 129
+        assert publications[-1] == 129  # No hidden final publication at step130.
+
+def test_sparse_publications_keep_f8_cache_refresh_frequency():
+    from slime.utils.weight_sync import should_flush_cache
+
+    versions = [1 + 64 * i for i in range(18)]
+    assert [v for v in versions if should_flush_cache(8, v, update_weights_interval=64)] == [1, 513, 1025]
+    assert should_flush_cache(8, 21, initial_weight_version=20, update_weights_interval=64)
+    assert not should_flush_cache(8, 65, initial_weight_version=20, update_weights_interval=64)
+
+def test_sparse_publication_installs_training_version_on_native_actor():
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    path = Path(__file__).resolve().parents[1] / "slime/backends/megatron_utils/actor.py"
+    tree = ast.parse(path.read_text())
+    function = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "update_weights")
+    function.decorator_list = []
+    sent = []
+    updater = SimpleNamespace(weight_version=1)
+
+    def update():
+        updater.weight_version += 1
+        sent.append(updater.weight_version)
+
+    updater.update_weights = update
+    actor = SimpleNamespace(
+        args=SimpleNamespace(debug_train_only=False, debug_rollout_only=False, rollout_external=True,
+                             use_fault_tolerance=False, offload_train=False, use_critic=False),
+        weight_updater=updater,
+        rollout_manager=SimpleNamespace(get_updatable_engines_and_lock=SimpleNamespace(
+            remote=lambda: ([object()], None, 0, [], [], []))),
+    )
+    namespace = {"ray": SimpleNamespace(get=lambda value: value), "nullcontext": nullcontext,
+                 "print_memory": lambda *a: None}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
+    namespace["update_weights"](actor, weight_version=65)
+    assert sent == [65]
+    with pytest.raises(ValueError, match="must increase"):
+        namespace["update_weights"](actor, weight_version=65)
+    assert sent == [65]
+
+def test_sparse_publication_staleness_uses_training_clock():
+    from types import SimpleNamespace
+    from slime.utils.staleness import compute_staleness_metrics
+    from slime.utils.types import Sample
+
+    path = Path(__file__).resolve().parents[1] / "slime/observability/rollout_metrics.py"
+    function = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "log_rollout_data")
+    logged = []
+    namespace = {
+        "compute_staleness_metrics": compute_staleness_metrics,
+        "dict_add_prefix": lambda values, prefix: {prefix + k: v for k, v in values.items()},
+        "compute_metrics_from_samples": lambda *a: {}, "compute_perf_metrics_from_samples": lambda *a: {},
+        "logger": SimpleNamespace(info=lambda *a: None), "compute_rollout_step": lambda args, step: step,
+        "logging_utils": SimpleNamespace(log=lambda args, values, **kw: logged.append(values)),
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(path), "exec"), namespace)
+    args = SimpleNamespace(custom_rollout_log_function_path=None, load_debug_rollout_data=None, update_weights_interval=64)
+    sample = Sample(prompt="question", response_length=2, weight_versions=["1"])
+    namespace["log_rollout_data"](63, args, [sample], {}, 1, weight_version=1)
+    assert logged[-1]["rollout/staleness/mean"] == 63
+    assert logged[-1]["rollout/staleness/publication_lag"] == 63
+    namespace["log_rollout_data"](64, args, [sample], {}, 1, weight_version=65)
+    assert logged[-1]["rollout/staleness/mean"] == 64  # An old queued sample remains old after publishing.
+    assert logged[-1]["rollout/staleness/publication_lag"] == 0
+
+@pytest.mark.parametrize("interval", [0, -1, 1, 64])
+@pytest.mark.parametrize("unsupported", [False, True])
+def test_publication_interval_native_validation(interval, unsupported):
+    from types import SimpleNamespace
+
+    path = Path(__file__).resolve().parents[1] / "slime/utils/arguments.py"
+    function = next(n for n in ast.parse(path.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "slime_validate_args")
+    # Isolate the native interval validation from CUDA/Megatron parser dependencies.
+    checks = [n for n in function.body if isinstance(n, ast.If) and ast.unparse(n.test).startswith("args.update_weights_interval")]
+    assert len(checks) == 2
+    args = SimpleNamespace(
+        update_weights_interval=interval, colocate=unsupported, offload_rollout=False,
+        release_train=False, use_critic=False, update_weight_mode="full", update_weight_transport="nccl",
+        rollout_function_path="slime.rollout.fully_async_rollout.generate_rollout_fully_async",
+        debug_train_only=False, debug_rollout_only=False, load_debug_rollout_data=None, train_backend="megatron", eval_interval=None,
+    )
+    code = compile(ast.Module(body=checks, type_ignores=[]), str(path), "exec")
+    if interval < 1 or (interval > 1 and unsupported):
+        with pytest.raises(ValueError):
+            exec(code, {"args": args})
+    else:
+        exec(code, {"args": args})
 
 
 if __name__ == "__main__":
