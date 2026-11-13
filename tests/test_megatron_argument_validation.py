@@ -361,6 +361,8 @@ def make_slime_validate_args(**overrides):
     values = dict(
         ckpt_format="torch_dist",
         flush_cache_interval=1,
+        update_weights_interval=1,
+        fully_async_max_consecutive_failed_groups=32,
         rollout_data_transport="object-store",
         rollout_data_dir=None,
         rollout_queue_lease_seconds=300,
