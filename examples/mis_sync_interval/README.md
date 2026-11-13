@@ -6,7 +6,7 @@ MIS IcePop[0.5,2] + SC top32 + R3, zero-coefficient Reference path retained,
 LR1e-6/WD0.1, BF16/SSM FP32, C16/P1/F8, native running32/graph32,
 packing49152, 2000 updates/save50 with optimizer/RNG/rollout state.
 
-M2 replaces M's ready4160/fill4032/oldest buffer experiment with native
+M2 disables R3 by explicit user instruction and replaces M's ready4160/fill4032/oldest buffer experiment with native
 `--update-weights-interval128`. No ready-buffer/type1/type2 implementation is
 imported. Startup publishes version1, cumulative update128 publishes129, then
 257 at256; saves/final do not force publications. F8 is per scheduled publication
@@ -27,6 +27,6 @@ used by M2. The upstream fork includes normal correctness/resource fixes absent
 in the historical snapshot, so results are a cross-version comparison as well
 as a staleness-mechanism comparison; scientific recipe flags are retained.
 
-Acceptance: actual native arguments, original rewards, finite gradients/SC/R3,
+Acceptance: actual native arguments, original rewards, finite gradients/SC, R3 off,
 initial-only publication before update128, real engine129 at the boundary,
 complete model/optimizer/RNG/rollout save50 and continued training.

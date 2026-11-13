@@ -83,7 +83,6 @@ ARGS=(
   --use-score-centering
   --score-centering-top-k 32
   --disable-grpo-std-normalization
-  --use-rollout-routing-replay
   --rollout-function-path slime.rollout.fully_async_rollout.generate_rollout_fully_async
   --flush-cache-interval 8
   --partial-rollout
