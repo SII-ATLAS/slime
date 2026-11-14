@@ -7,8 +7,14 @@ from examples.mis_sync_interval.if_mix_support import log_sources, reward
 from slime.utils.arguments import parse_args
 
 a = parse_args()
-assert a.start_rollout_id == 0 and a.load == os.environ["MODEL_DIR"]
-assert a.no_load_optim and a.no_load_rng and a.finetune
+if os.environ.get("CKPT_STEP"):
+    step = int(os.environ["CKPT_STEP"])
+    assert a.ckpt_step == step and a.start_rollout_id == step + 1
+    assert a.load == os.environ["LOAD_DIR"]
+    assert not a.no_load_optim and not a.no_load_rng and not a.finetune
+else:
+    assert a.start_rollout_id == 0 and a.load == os.environ["MODEL_DIR"]
+    assert a.no_load_optim and a.no_load_rng and a.finetune
 assert a.update_weights_interval == 128 and a.num_rollout == 2000 and a.save_interval == 50
 assert a.use_score_centering and a.score_centering_top_k == 32 and a.use_tis
 assert a.global_batch_size == 512 and a.rollout_batch_size == 64 and a.n_samples_per_prompt == 8
@@ -22,4 +28,5 @@ assert a.ref_load == os.environ["MODEL_DIR"] and a.use_kl_loss and a.kl_loss_coe
 assert not a.grpo_std_normalization and a.rollout_data_transport == "object-store"
 assert not a.use_rollout_routing_replay and not a.use_routing_replay
 assert not hasattr(a, "fully_async_ready_buffer_size")
-print("M2_ARGS_VALIDATED: Base/start0, sync128, MIS+SC32/R3off, M data/resource flags, 2000/save50", flush=True)
+print(f"M2_ARGS_VALIDATED: load={a.load}, start={a.start_rollout_id}, ckpt={a.ckpt_step}, "
+      "sync128, MIS+SC32/R3off, M data/resource flags, 2000/save50", flush=True)

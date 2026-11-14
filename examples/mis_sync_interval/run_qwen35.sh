@@ -66,8 +66,8 @@ ARGS=(
   --num-gpus-per-node 8
   "${MODEL_ARGS[@]}"
   --hf-checkpoint "${MODEL_DIR}"
-  --load "${MODEL_DIR}"
-  --start-rollout-id 0
+  --load "${LOAD_DIR:-$MODEL_DIR}"
+  --start-rollout-id "${START_ROLLOUT_ID:-0}"
   --update-weights-interval 128
   --ref-load "${MODEL_DIR}"
   --prompt-data "${TRAIN_DATA}"
@@ -161,6 +161,12 @@ ARGS=(
   --sglang-enable-metrics
   --eval-max-context-len 32768
 )
+if [[ -n "${CKPT_STEP:-}" ]]; then
+  : "${LOAD_DIR:?Set the checkpoint root when resuming}"
+  : "${START_ROLLOUT_ID:?Set checkpoint step + 1 when resuming}"
+  [[ "$CKPT_STEP" =~ ^[0-9]+$ && "$START_ROLLOUT_ID" == "$((CKPT_STEP + 1))" ]]
+  ARGS+=(--ckpt-step "$CKPT_STEP")
+fi
 if [[ "${1:-}" == --check-args ]]; then
   python3 -m examples.mis_sync_interval.check_args "${ARGS[@]}"; exit
 fi

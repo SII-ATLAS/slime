@@ -30,3 +30,11 @@ as a staleness-mechanism comparison; scientific recipe flags are retained.
 Acceptance: actual native arguments, original rewards, finite gradients/SC, R3 off,
 initial-only publication before update128, real engine129 at the boundary,
 complete model/optimizer/RNG/rollout save50 and continued training.
+
+To resume a complete checkpoint, set LOAD_DIR to its original checkpoint root,
+CKPT_STEP to the paired model/rollout step, and START_ROLLOUT_ID to CKPT_STEP+1.
+Use fresh RUN and CHECKPOINT_DIR output directories; optimizer, RNG, dataset
+cursor and rollout state load through native Slime restoration. The total
+remains 2000 updates. Startup publishes checkpoint version CKPT_STEP+2; scheduled
+publications still follow cumulative update128 boundaries. This startup
+publication changes the staleness trajectory relative to uninterrupted training.
